@@ -1,5 +1,7 @@
 
-INC := -I$(HOME)/0_project/serial_net/external/googletest/googletest/include/
-LIB:= -L$(HOME)/0_project/serial_net/out/external/googletest/googletest
+GTEST_ROOT:=/usr/src/gtest
+INC := -I$(GTEST_ROOT)/include/ -Isrc
+LIB:= -L$(GTEST_ROOT)
+
 all:
-	g++ -std=c++14 $(INC) $(LIB) StateChart.cpp fsm_test.cpp fsm_test2.cpp -l:libgtest.a -pthread
+	g++ -std=c++14 $(INC) $(LIB) src/StateChart.cpp test/fsm_test.cpp test/fsm_test2.cpp -l:libgtest.a -pthread
