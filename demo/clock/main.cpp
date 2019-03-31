@@ -19,6 +19,41 @@ using std::chrono::hours;
 using std::chrono::duration_cast;
 using std::string;
 
+/**
+Design idea:
+Have a mode (Abbr):
+- (fa) Initial, no time set. (Go to Set time)
+- (ti) Show time.
+- (da) Show date.
+- (al) Show alarm.
+- (sw) Stopwatch.
+- (mt) Middle time.
+- (st) Set time.
+- (sd) Set date.
+- (sa) Set alarm.
+
+Some mode auto ends after short time.
+- Show date. -> Show time.
+- Show alarm. -> Show time.
+
+When cursor is at left side, left arrow quits application.
+Visuals:
+- 2 characters indicating mode to the left.
+- During set operations, all numbers blink.
+- During show time, colon blinks slowly.
+- During Middle time + running stopwatch, colon blinks.
+- During non-set opeations, cursor is at line start.
+
+- During set operations, cursor at end column and key right commit the set.
+
+- When cursor is at line start, up/down changes mode.
+- When cursor not at line start: up/down changes numbers.
+
+- During sw: Right arrow toggles running.
+- During sw and running: Left arrow toggles middle time.
+- During sw and stopped: Left arrow reset stopwatch time.
+*/
+
 enum class EventId
 {
 	no_key,
@@ -56,6 +91,7 @@ public:
 		fcntl(m_fd, F_SETFL, fcntl(m_fd, F_GETFL) & ~O_NONBLOCK);
 		tcsetattr(m_fd, TCSANOW, &m_of);
 	}
+
 	int readChar()
 	{
 		char c = 0;
@@ -95,9 +131,51 @@ private:
 	struct termios m_of;
 };
 
+class Display
+{
+public:
+	void update();
+	void printTime(system_clock::duration dur, int offset);
+	void print(string time, int charPos, bool showStr);
+
+	int m_cPos = 0;
+	bool m_blink = false;
+	bool m_colonBlink = false;
+};
+
+void Display::print(string time, int charPos, bool showStr)
+{
+	int offset = charPos + (charPos < 3 ? 0 : charPos < 5 ? 1 : 2);
+	if (showStr)
+		time = string(" ") + time;
+	else
+		time = string(1 + time.size(), ' ');
+
+	fmt::print("\r {}", time);
+	fmt::print("\r {}", string(time.begin(), time.begin() + offset));	
+	cout.flush();
+}
+
+void Display::printTime(system_clock::duration dur, int offset)
+{
+	auto delta = dur;
+	int millisec = duration_cast<milliseconds>(delta).count() % 1000;
+	int sec = duration_cast<seconds>(delta).count() % 60;
+	int min = duration_cast<minutes>(delta).count() % 60;
+	int hour = duration_cast<hours>(delta).count() % 24;
+
+	char c = ':';
+	bool show = millisec >= 250 && millisec < 750;
+	string time = fmt::format("{:02}{}{:02}{}{:02}", hour, c, min, c, sec);
+	print(time, offset, true);
+}
+
 enum class StateId
 {
+	root,
 	showTime,
+	setTime,
+	endState,
 	stateIdNo
 };
 
@@ -116,73 +194,117 @@ class DigitalWatch : public FsmBase<StateDesc>
 public:
 	DigitalWatch();
 	void print(string time, int charPos, bool show);
+	void tick()
+	{
+		m_display.printTime(system_clock::now() - m_base, m_offset);
+	}
 
 	using tp = system_clock::time_point;
 	tp m_base;
-};
-
-class ShowTimeState : public StateBase<StateDesc, StateId::showTime>
-{
-public:
-	explicit ShowTimeState(StateArgs& args) : StateBase(args) {}
-	bool event(const Event& ev)
-	{
-		using Id = Event::Id;
-		switch(ev.m_id)
-		{
-		case Id::tick:
-			tick();
-			break;
-		case Id::arrow_left:
-			m_offset -= m_offset > 0 ? 1 : 0;
-			break;
-		case Id::arrow_right:
-			m_offset += m_offset < 10 ? 1 : 0;
-			break;
-		}
-		return true;
-	}
-
-	void tick();
+	Display m_display;
 	int m_offset = 0;
 };
-
-void ShowTimeState::tick()
-{
-	auto delta = system_clock::now() - fsm().m_base;
-	int millisec = duration_cast<milliseconds>(delta).count() % 1000;
-	int sec = duration_cast<seconds>(delta).count() % 60;
-	int min = duration_cast<minutes>(delta).count() % 60;
-	int hour = duration_cast<hours>(delta).count() % 24;
-
-	char c = ':'; //millisec >= 500 ? ' ' : ':';
-	bool show = millisec >= 250 && millisec < 750;
-	string time = fmt::format("{:02}{}{:02}{}{:02}", hour, c, min, c, sec);
-	fsm().print(time, m_offset, show);
-}
-
-void StateDesc::setupStates(FsmSetup<StateDesc>& sc)
-{
-	sc.addState<ShowTimeState>();
-}
 
 DigitalWatch::DigitalWatch()
 {
 	m_base = system_clock::now();
-	fmt::print("\n\n");
 }
 
-void DigitalWatch::print(string time, int charPos, bool showStr)
+template<StateId id>
+class State : public StateBase<StateDesc, id>
 {
-	int offset = charPos + (charPos < 3 ? 0 : charPos < 5 ? 1 : 2);
-	if (showStr)
-		time = string(" ") + time;
-	else
-		time = string(1 + time.size(), ' ');
+public:
+	using EId = Event::Id;
+	using SId = StateId;
+	explicit State(StateArgs& args) : StateBase<StateDesc, id>(args) {}
+};
 
-	fmt::print("\r {}", time);
-	fmt::print("\r {}", string(time.begin(), time.begin() + offset));	
-	cout.flush();
+class EndState : public State<StateId::endState>
+{
+public:
+	explicit EndState(StateArgs& args) : State(args) {}
+	bool event(const Event& ev)
+	{ return false; }
+};
+
+class RootState : public State<StateId::root>
+{
+public:
+	explicit RootState(StateArgs& args) : State(args) {}
+
+	bool event(const Event& ev)
+	{
+		switch(ev.m_id)
+		{
+		case EId::arrow_left:
+			if (fsm().m_offset == 0) {
+				transition(StateId::endState);
+			}
+			break;
+		case EId::key:
+			if (ev.m_key == 'x') {
+				transition(StateId::endState);
+			}
+			break;
+		}
+		return false;
+	}
+};
+
+class SetTimeState : public State<StateId::setTime>
+{
+public:
+	explicit SetTimeState(StateArgs& args) : State(args) {}
+	bool event(const Event& ev)
+	{
+		switch(ev.m_id)
+		{
+		case EId::tick:
+			fsm().tick();
+			break;
+		case EId::arrow_left:
+			fsm().m_offset -= fsm().m_offset > 0 ? 1 : 0;
+			break;
+		case EId::arrow_right:
+			fsm().m_offset += fsm().m_offset < 10 ? 1 : 0;
+			break;
+		case EId::arrow_up:
+			if (fsm().m_offset == 0)
+				transition(StateId::showTime);
+			break;
+		}
+		return false;
+	}
+};
+
+class ShowTimeState : public State<StateId::showTime>
+{
+public:
+	explicit ShowTimeState(StateArgs& args) : State(args) {}
+
+	bool event(const Event& ev);
+};
+
+bool ShowTimeState::event(const Event& ev)
+{
+	switch(ev.m_id)
+	{
+	case EId::tick:
+		fsm().tick();
+		break;
+	case EId::arrow_up:
+		transition(StateId::setTime);
+		break;
+	}
+	return false;
+}
+
+void StateDesc::setupStates(FsmSetup<StateDesc>& sc)
+{
+	sc.addState<RootState>();
+	sc.addState<ShowTimeState, RootState>();
+	sc.addState<SetTimeState, RootState>();
+	sc.addState<EndState>();
 }
 
 int main()
@@ -194,20 +316,15 @@ int main()
 	NonBlockKeys nbKeys;
 	DigitalWatch dw;
 	dw.setStartState(StateId::showTime);
-	using Id = Event::Id;
+	using EId = Event::Id;
 
-	while(1)
+	while(dw.currentStateId() != StateId::endState)
 	{
 		Event ev = nbKeys.getChar();
-		// cout << int(ev.m_id) << " " << int(ev.m_key) << "\n\r";
-		if (ev.m_id == Id::key && ev.m_key == 'x')
-			break;
-
-		if (ev.m_id == Id::no_key)
-			dw.postEvent(Event{Id::tick});
-		else
+		if (ev.m_id != EId::no_key)
 			dw.postEvent(ev);
 
+		dw.postEvent(Event{EId::tick});
 		cout.flush();
 		usleep(50000);
 	}

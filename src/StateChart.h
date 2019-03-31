@@ -107,7 +107,7 @@ class StateBase
      */
     void transition(StateId id)
     {
-        m_fsm->m_base.transition(static_cast<int>(id));
+        fsm().member().transition(static_cast<int>(id));
     }
 
     /**
@@ -325,6 +325,15 @@ class FsmBaseMember
 
 class FsmBaseBase
 {
+public:
+    FsmBaseMember& member() 
+    {
+        return m_base;
+    }
+    const FsmBaseMember& member() const
+    {
+        return m_base;
+    }
   protected:
     FsmBaseBase(const FsmStaticData& setup) : m_base(setup) {}
 
@@ -452,7 +461,7 @@ class FsmBaseEvent : public FsmBaseBase
   private:
     void processEvent(const Event& ev)
     {
-        auto activeInfo = m_base.activeStateInfo();
+        auto activeInfo = member().activeStateInfo();
         if (!activeInfo)
             return;
 
@@ -460,11 +469,11 @@ class FsmBaseEvent : public FsmBaseBase
         int level = activeInfo->m_level;
         while (!eventHandled && level >= 0)
         {
-            auto activeState = m_base.getModelBase(level);
+            auto activeState = member().getModelBase(level);
             eventHandled = emitEvent(activeState, ev);
             level--;
         }
-        m_base.possiblyDoTransition(this);
+        member().possiblyDoTransition(this);
     }
 
     static bool emitEvent(ModelBase* sbb, const Event& ev)
@@ -485,6 +494,8 @@ class FsmBase : public FsmBaseEvent<typename FsmDesc::Event>
     using StateId = typename FsmDesc::StateId;
     using Event = typename FsmDesc::Event;
     using FsmDescription = FsmDesc;
+    using FsmBaseBase::member;
+
     static const constexpr int stateNo = static_cast<int>(StateId::stateIdNo);
 
     static StateId nullStateId()
@@ -502,7 +513,7 @@ class FsmBase : public FsmBaseEvent<typename FsmDesc::Event>
      */
     void setStartState(StateId id)
     {
-        FsmBaseBase::m_base.setStartState(static_cast<int>(id), this);
+        member().setStartState(static_cast<int>(id), this);
     }
 
     /**
@@ -510,7 +521,7 @@ class FsmBase : public FsmBaseEvent<typename FsmDesc::Event>
      */
     StateId currentStateId() const
     {
-        return static_cast<StateId>(FsmBaseBase::m_base.activeStateId());
+        return static_cast<StateId>(member().activeStateId());
     }
 
     /**
@@ -549,7 +560,7 @@ ParentState&
 StateBase<FsmDesc, stId>::parent()
 {
     StateId parentId = ParentState::stateId;
-    ModelBase* mb = fsm().m_base.parent(static_cast<int>(parentId));
+    ModelBase* mb = fsm().member().parent(static_cast<int>(parentId));
     return static_cast<StateModel<FsmDesc, ParentState>*>(mb)->m_state;
 }
 
@@ -559,7 +570,7 @@ void
 StateBase<FsmDesc, stId>::transition()
 {
     static constexpr const StateId targetId = TargetState::stateId;
-    m_fsm->m_base.transition(static_cast<int>(targetId));
+    m_fsm->member().transition(static_cast<int>(targetId));
 }
 
 template <class FsmDesc>
@@ -568,12 +579,12 @@ const State*
 FsmBase<FsmDesc>::currentState() const
 {
     if (State::stateId !=
-        static_cast<StateId>(FsmBaseBase::m_base.activeStateId()))
+        static_cast<StateId>(member().activeStateId()))
         return nullptr;
 
-    const FsmStaticData::StateInfo* p = FsmBaseBase::m_base.activeStateInfo();
+    const FsmStaticData::StateInfo* p = member().activeStateInfo();
 
-    const auto* mb = FsmBaseBase::m_base.getModelBase(p->m_level);
+    const auto* mb = member().getModelBase(p->m_level);
     return &(static_cast<const StateModel<FsmDesc, State>*>(mb)->m_state);
 }
 
@@ -583,7 +594,7 @@ const State*
 FsmBase<FsmDesc>::activeState() const
 {
     int targetId = static_cast<int>(State::stateId);
-    const ModelBase* mb = FsmBaseBase::m_base.activeState(targetId);
+    const ModelBase* mb = member().activeState(targetId);
     return mb ? &(static_cast<const StateModel<FsmDesc, State>*>(mb)->m_state)
               : nullptr;
 }
