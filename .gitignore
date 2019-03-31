@@ -2,4 +2,6 @@ a.out
 *~
 *.o
 demo/clock/demo
-
+.project
+.cproject
+.settings

@@ -65,6 +65,8 @@ enum class EventId
 	arrow_right
 };
 
+enum class StateId;
+
 class Event
 {
 public:
@@ -134,29 +136,58 @@ private:
 class Display
 {
 public:
+	static const constexpr int o2Do[] = { 0, 4, 5, 7, 8, 10, 11 };
+	static const constexpr int maxOffset = sizeof o2Do / sizeof(int);
+
 	void update();
-	void printTime(system_clock::duration dur, int offset);
+	void printTime(system_clock::duration dur);
+	void print(int grp1, int grp2, int grp3, bool showColon);
 	void print(string time, int charPos, bool showStr);
 
-	int m_cPos = 0;
+	bool cursorRight()
+	{
+		bool update = m_offset < maxOffset - 1;
+		m_offset += update ? 1 : 0;
+		return update;
+	}
+	bool cursorLeft()
+	{
+		bool update = m_offset > 0;
+		m_offset -= update ? 1 : 0;
+		return update;
+	}
+	void setMode(string m)
+	{
+		m_mode = m;
+	}
+	int m_offset = 0;
 	bool m_blink = false;
 	bool m_colonBlink = false;
+	std::string m_mode;
 };
+
+const constexpr int Display::o2Do[];
 
 void Display::print(string time, int charPos, bool showStr)
 {
-	int offset = charPos + (charPos < 3 ? 0 : charPos < 5 ? 1 : 2);
-	if (showStr)
-		time = string(" ") + time;
-	else
-		time = string(1 + time.size(), ' ');
 
-	fmt::print("\r {}", time);
-	fmt::print("\r {}", string(time.begin(), time.begin() + offset));	
+	int dOffset = m_offset < maxOffset ? o2Do [m_offset] : 11;
+	if (!showStr)
+		time = string(time.size(), ' ');
+
+	fmt::print("\r{}", time);
+	fmt::print("\r{}", string(time.begin(), time.begin() + dOffset));
 	cout.flush();
 }
 
-void Display::printTime(system_clock::duration dur, int offset)
+void Display::print(int grp1, int grp2, int grp3, bool showColon)
+{
+	char c = showColon ? ':' : ' ';
+	string time = fmt::format(" {:2} {:02}{}{:02}{}{:02}", m_mode, grp1, c, grp2, c, grp3);
+	print(time, m_offset, true);
+}
+
+void Display::printTime(system_clock::duration dur)
 {
 	auto delta = dur;
 	int millisec = duration_cast<milliseconds>(delta).count() % 1000;
@@ -166,8 +197,8 @@ void Display::printTime(system_clock::duration dur, int offset)
 
 	char c = ':';
 	bool show = millisec >= 250 && millisec < 750;
-	string time = fmt::format("{:02}{}{:02}{}{:02}", hour, c, min, c, sec);
-	print(time, offset, true);
+	string time = fmt::format(" {:2} {:02}{}{:02}{}{:02}", m_mode, hour, c, min, c, sec);
+	print(time, m_offset, true);
 }
 
 enum class StateId
@@ -196,19 +227,34 @@ public:
 	void print(string time, int charPos, bool show);
 	void tick()
 	{
-		m_display.printTime(system_clock::now() - m_base, m_offset);
+		m_display.setMode(modeString(currentStateId()));
+		m_display.printTime(system_clock::now() - m_base);
 	}
 
+	// Return a 2 letter indicator of the current mode.
+	const char* modeString(StateId is) const;
 	using tp = system_clock::time_point;
 	tp m_base;
 	Display m_display;
-	int m_offset = 0;
 };
 
 DigitalWatch::DigitalWatch()
 {
 	m_base = system_clock::now();
 }
+
+const char* DigitalWatch::modeString(StateId is) const
+{
+	using SId = StateId;
+	switch(is)
+	{
+	case SId::endState: return "en";
+	case SId::setTime: return "st";
+	case SId::showTime: return "ti";
+	default: return "un";
+	}
+}
+
 
 template<StateId id>
 class State : public StateBase<StateDesc, id>
@@ -230,14 +276,15 @@ public:
 class RootState : public State<StateId::root>
 {
 public:
-	explicit RootState(StateArgs& args) : State(args) {}
+	explicit RootState(StateArgs& args)
+	: State(args), m_display(fsm().m_display) {}
 
 	bool event(const Event& ev)
 	{
 		switch(ev.m_id)
 		{
 		case EId::arrow_left:
-			if (fsm().m_offset == 0) {
+			if (m_display.m_offset == 0) {
 				transition(StateId::endState);
 			}
 			break;
@@ -249,40 +296,99 @@ public:
 		}
 		return false;
 	}
+	Display& m_display;
 };
 
 class SetTimeState : public State<StateId::setTime>
 {
 public:
-	explicit SetTimeState(StateArgs& args) : State(args) {}
+	explicit SetTimeState(StateArgs& args)
+	: State(args), m_display(fsm().m_display)
+	{
+		m_display.setMode(fsm().modeString(SId::setTime));
+		auto delta = system_clock::now() - fsm().m_base;
+		m_sec = duration_cast<seconds>(delta).count() % 60;
+		m_min = duration_cast<minutes>(delta).count() % 60;
+		m_hour = duration_cast<hours>(delta).count() % 24;
+	}
+	~SetTimeState()
+	{}
 	bool event(const Event& ev)
 	{
 		switch(ev.m_id)
 		{
 		case EId::tick:
-			fsm().tick();
+			m_display.print(m_hour, m_min, m_sec, true);
 			break;
 		case EId::arrow_left:
-			fsm().m_offset -= fsm().m_offset > 0 ? 1 : 0;
-			break;
+			m_display.cursorLeft();
+			return true;
 		case EId::arrow_right:
-			fsm().m_offset += fsm().m_offset < 10 ? 1 : 0;
-			break;
+			if (!m_display.cursorRight()) {
+				m_display.m_offset = 0;
+				auto dt = hours(m_hour) + minutes(m_min) + seconds(m_sec);
+				fsm().m_base = system_clock::now() - dt;
+				transition(SId::showTime);
+			}
+			return true;
 		case EId::arrow_up:
-			if (fsm().m_offset == 0)
-				transition(StateId::showTime);
+		{
+			auto add = [](int& val, int mult, int max)
+			{
+				if (val + mult < max)
+					val += mult;
+			};
+			switch(m_display.m_offset)
+			{
+			case 0: transition(SId::showTime); return true;
+			case 1: add(m_hour, 10, 24); return true;
+			case 2: add(m_hour, 1, 24); return true;
+			case 3: add(m_min, 10, 60); return true;
+			case 4: add(m_min, 1, 60); return true;
+			case 5: add(m_sec, 10, 60); return true;
+			case 6: add(m_sec, 1, 60); return true;
+			}
 			break;
+		}
+		case EId::arrow_down:
+		{
+			auto sub = [](int& val, int mult)
+			{
+				if (val - mult >= 0)
+					val -= mult;
+			};
+			switch(m_display.m_offset)
+			{
+			case 0: transition(SId::showTime); return true;
+			case 1: sub(m_hour, 10); return true;
+			case 2: sub(m_hour, 1); return true;
+			case 3: sub(m_min, 10); return true;
+			case 4: sub(m_min, 1); return true;
+			case 5: sub(m_sec, 10); return true;
+			case 6: sub(m_sec, 1); return true;
+			}
+			break;
+		}
 		}
 		return false;
 	}
+
+	int m_sec;
+	int m_min;
+	int m_hour;
+	Display& m_display;
 };
 
 class ShowTimeState : public State<StateId::showTime>
 {
 public:
-	explicit ShowTimeState(StateArgs& args) : State(args) {}
-
+	explicit ShowTimeState(StateArgs& args)
+	: State(args), m_display(fsm().m_display)
+	{
+		m_display.setMode(fsm().modeString(SId::showTime));
+	}
 	bool event(const Event& ev);
+	Display& m_display;
 };
 
 bool ShowTimeState::event(const Event& ev)
@@ -290,9 +396,13 @@ bool ShowTimeState::event(const Event& ev)
 	switch(ev.m_id)
 	{
 	case EId::tick:
+		m_display.printTime(system_clock::now() - fsm().m_base);
 		fsm().tick();
 		break;
 	case EId::arrow_up:
+		transition(StateId::setTime);
+		break;
+	case EId::arrow_down:
 		transition(StateId::setTime);
 		break;
 	}
@@ -311,7 +421,9 @@ int main()
 {
 	fmt::print("   Digital Watch   \n");
 	fmt::print("Use arrow keys to control.\n");
-	fmt::print("Press 'x' to quit.\n\n");
+	fmt::print(" ti: Display current time.\n");
+	fmt::print(" st: Set time.\n\n");
+	fmt::print("Left arrow in ti to quit.\n\n");
 
 	NonBlockKeys nbKeys;
 	DigitalWatch dw;
