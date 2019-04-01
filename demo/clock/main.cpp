@@ -8,15 +8,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <date/date.h>
+
 using std::cout;
 using std::endl;
-using std::chrono::time_point;
-using std::chrono::system_clock;
-using std::chrono::milliseconds;
-using std::chrono::seconds;
-using std::chrono::minutes;
-using std::chrono::hours;
-using std::chrono::duration_cast;
+using namespace std::chrono;
+using namespace date;
 using std::string;
 
 /**
@@ -133,14 +130,64 @@ private:
 	struct termios m_of;
 };
 
+class LClock
+{
+public:
+	using Duration = std::chrono::system_clock::duration;
+	using TimePoint = std::chrono::system_clock::time_point;
+
+	LClock() = default;
+	TimePoint now() const
+	{
+		return std::chrono::system_clock::now() + m_diff;
+	}
+
+	void setTime(Duration timeOfDay)
+	{
+		auto now = system_clock::now();
+		auto localTime = now + m_diff;
+		auto today = floor<days>(localTime);
+		m_diff = (today + timeOfDay) - now;
+	}
+
+	void setDate(sys_days days_)
+	{
+		auto now = system_clock::now();
+		auto localTime = now + m_diff;
+		auto timeOfDay = localTime - floor<days>(localTime);
+		m_diff = (timeOfDay + days_) - now;
+	}
+	Duration secSinceEpoch() const
+	{
+		return now().time_since_epoch();
+	}
+	sys_days daysSinceEpoch() const
+	{
+		return floor<days>(now());
+	}
+
+	int msec() const { return duration_cast<milliseconds>(secSinceEpoch()).count() % 1000; };
+	int sec() const { return duration_cast<seconds>(secSinceEpoch()).count() % 60; };
+	int min() const { return duration_cast<minutes>(secSinceEpoch()).count() % 60; };
+	int hour() const { return duration_cast<hours>(secSinceEpoch()).count() % 24; };
+	int day() const { return static_cast<unsigned>( year_month_day(daysSinceEpoch()).day()); }
+	int month() const { return static_cast<unsigned>( year_month_day(daysSinceEpoch()).month()); }
+	int year() const { return static_cast<int>( year_month_day(daysSinceEpoch()).year()); }
+
+private:
+	Duration m_diff = {};
+};
+
+
 class Display
 {
 public:
+	Display(LClock& lc) : m_clock(lc) {}
 	static const constexpr int o2Do[] = { 0, 4, 5, 7, 8, 10, 11 };
 	static const constexpr int maxOffset = sizeof o2Do / sizeof(int);
 
 	void update();
-	void printTime(system_clock::duration dur);
+	void printTime();
 	void print(int grp1, int grp2, int grp3, bool showColon);
 	void print(string time, int charPos, bool showStr);
 
@@ -164,6 +211,7 @@ public:
 	bool m_blink = false;
 	bool m_colonBlink = false;
 	std::string m_mode;
+	LClock& m_clock;
 };
 
 const constexpr int Display::o2Do[];
@@ -187,13 +235,12 @@ void Display::print(int grp1, int grp2, int grp3, bool showColon)
 	print(time, m_offset, true);
 }
 
-void Display::printTime(system_clock::duration dur)
+void Display::printTime()
 {
-	auto delta = dur;
-	int millisec = duration_cast<milliseconds>(delta).count() % 1000;
-	int sec = duration_cast<seconds>(delta).count() % 60;
-	int min = duration_cast<minutes>(delta).count() % 60;
-	int hour = duration_cast<hours>(delta).count() % 24;
+	int millisec = m_clock.msec();
+	int sec = m_clock.sec();
+	int min = m_clock.min();
+	int hour = m_clock.hour();
 
 	char c = ':';
 	bool show = millisec >= 250 && millisec < 750;
@@ -228,19 +275,19 @@ public:
 	void tick()
 	{
 		m_display.setMode(modeString(currentStateId()));
-		m_display.printTime(system_clock::now() - m_base);
+		m_display.printTime();
 	}
 
 	// Return a 2 letter indicator of the current mode.
 	const char* modeString(StateId is) const;
-	using tp = system_clock::time_point;
-	tp m_base;
+
 	Display m_display;
+	LClock m_clock;
 };
 
 DigitalWatch::DigitalWatch()
+: m_display(m_clock)
 {
-	m_base = system_clock::now();
 }
 
 const char* DigitalWatch::modeString(StateId is) const
@@ -306,10 +353,10 @@ public:
 	: State(args), m_display(fsm().m_display)
 	{
 		m_display.setMode(fsm().modeString(SId::setTime));
-		auto delta = system_clock::now() - fsm().m_base;
-		m_sec = duration_cast<seconds>(delta).count() % 60;
-		m_min = duration_cast<minutes>(delta).count() % 60;
-		m_hour = duration_cast<hours>(delta).count() % 24;
+		auto& clk = fsm().m_clock;
+		m_sec = clk.sec();
+		m_min = clk.min();
+		m_hour = clk.hour();
 	}
 	~SetTimeState()
 	{}
@@ -327,7 +374,7 @@ public:
 			if (!m_display.cursorRight()) {
 				m_display.m_offset = 0;
 				auto dt = hours(m_hour) + minutes(m_min) + seconds(m_sec);
-				fsm().m_base = system_clock::now() - dt;
+				fsm().m_clock.setTime(dt);
 				transition(SId::showTime);
 			}
 			return true;
@@ -396,7 +443,7 @@ bool ShowTimeState::event(const Event& ev)
 	switch(ev.m_id)
 	{
 	case EId::tick:
-		m_display.printTime(system_clock::now() - fsm().m_base);
+		m_display.printTime();
 		fsm().tick();
 		break;
 	case EId::arrow_up:
